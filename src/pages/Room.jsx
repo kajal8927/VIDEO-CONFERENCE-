@@ -23,7 +23,7 @@ import {
   Unlock,
 } from "lucide-react";
 
-const SERVER_URL = import.meta.env.VITE_BACKEND_URL || URI;
+const SERVER_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3000";
 
 const Room = () => {
   const { roomId } = useParams();
