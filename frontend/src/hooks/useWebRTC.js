@@ -10,15 +10,20 @@ const configuration = {
 export const useWebRTC = (socket, roomId, localStream) => {
   const [streams, setStreams] = useState({});
   const peersRef = useRef({});
+  const localStreamRef = useRef(localStream);
+
+  useEffect(() => {
+    localStreamRef.current = localStream;
+  }, [localStream]);
 
   const createPeer = useCallback(
     (targetId, isInitiator) => {
       const peer = new RTCPeerConnection(configuration);
       peersRef.current[targetId] = peer;
 
-      if (localStream) {
-        localStream.getTracks().forEach((track) => {
-          peer.addTrack(track, localStream);
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((track) => {
+          peer.addTrack(track, localStreamRef.current);
         });
       }
 
@@ -69,11 +74,11 @@ export const useWebRTC = (socket, roomId, localStream) => {
 
       return peer;
     },
-    [socket, localStream]
+    [socket]
   );
 
   useEffect(() => {
-    if (!socket || !localStream) return;
+    if (!socket) return;
 
     const handleRoomUsers = (users) => {
       users.forEach((userId) => {
@@ -160,7 +165,7 @@ export const useWebRTC = (socket, roomId, localStream) => {
       peersRef.current = {};
       setStreams({});
     };
-  }, [socket, localStream, createPeer]);
+  }, [socket, createPeer]);
 
   const replaceVideoTrack = useCallback(async (newVideoTrack) => {
     Object.values(peersRef.current).forEach((peer) => {

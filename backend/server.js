@@ -10,7 +10,10 @@ const ALLOWED_ORIGIN = process.env.FRONTEND_URL || "http://localhost:5173";
 
 app.use(
   cors({
-    origin: ALLOWED_ORIGIN,
+    origin:[ "http://localhost:5173",
+     "https://video-conference-ozyy.onrender.com"
+    ],
+    credentials:true
   })
 );
 
@@ -29,10 +32,107 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: ALLOWED_ORIGIN,
+    origin:[
+       "http://localhost:5173",
+       "https://video-conference-ozyy.onrender.com"
+    ],
     methods: ["GET", "POST"],
   },
 });
+
+app.post("/api/summary", async (req, res) => {
+  try {
+    const { roomId, messages = [], speakingStats = {} } = req.body;
+    
+    if (!roomId) {
+      return res.status(400).json({ error: "roomId is required" });
+    }
+
+    const spokenNames = Object.values(speakingStats)
+      .filter((s) => s.totalSpeakingTime > 3000)
+      .map((s) => s.userName);
+
+    const activeParticipants = spokenNames.length > 0 ? spokenNames : ["everyone"];
+    let dominantSpeaker = null;
+    let maxTime = 0;
+    
+    for (const stat of Object.values(speakingStats)) {
+       if (stat.totalSpeakingTime > maxTime) {
+           maxTime = stat.totalSpeakingTime;
+           dominantSpeaker = stat.userName;
+       }
+    }
+
+    const openaiApiKey = process.env.OPENAI_API_KEY;
+
+    if (openaiApiKey) {
+      try {
+        const response = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${openaiApiKey}`
+          },
+          body: JSON.stringify({
+            model: "gpt-4-turbo-preview",
+            messages: [
+              {
+                role: "system",
+                content: "You are an AI meeting assistant. Generate a JSON response with three keys: 'summary' (a brief paragraph summarizing the meeting), 'keyPoints' (an array of 3-5 string bullet points), and 'actionItems' (an array of string actionable tasks based on the chat). If the chat is empty, generate generic points about a brief sync."
+              },
+              {
+                role: "user",
+                content: `Meeting Room: ${roomId}\nParticipants: ${activeParticipants.join(", ")}\nDominant Speaker: ${dominantSpeaker || 'None'}\nChat Log:\n${messages.map(m => `${m.senderName}: ${m.text}`).join("\n")}`
+              }
+            ],
+            response_format: { type: "json_object" }
+          })
+        });
+
+        const data = await response.json();
+        
+        if (data.choices && data.choices[0] && data.choices[0].message) {
+           const aiContent = JSON.parse(data.choices[0].message.content);
+           return res.json({
+             summary: aiContent.summary,
+             keyPoints: aiContent.keyPoints || [],
+             actionItems: aiContent.actionItems || [],
+             participantInsights: dominantSpeaker ? [`${dominantSpeaker} was the dominant speaker.`] : []
+           });
+        }
+      } catch (err) {
+        console.error("OpenAI API Error, falling back to rule-based:", err);
+      }
+    }
+
+    const chatTopics = messages.length > 0
+      ? messages.map((m) => m.text).slice(0, 3).join(", ")
+      : "general topics";
+
+    const ruleBasedSummary = {
+      summary: `This meeting involved key participants: ${activeParticipants.join(", ")}. The discussion mainly touched upon ${chatTopics}. Overall, it was a productive session with active engagement.`,
+      keyPoints: [
+        "Reviewed recent updates and general progress.",
+        messages.length > 0 ? "Addressed topics mentioned in the chat." : "Standard team sync.",
+        dominantSpeaker ? `${dominantSpeaker} led a significant portion of the conversation.` : "Participation was relatively balanced."
+      ],
+      actionItems: [
+        "Follow up on topics discussed in the chat.",
+        "Schedule the next sync if necessary.",
+      ],
+      participantInsights: [
+        dominantSpeaker ? `Dominant speaker: ${dominantSpeaker}` : "No clear dominant speaker.",
+        `Total active speakers: ${spokenNames.length}`
+      ]
+    };
+
+    res.json(ruleBasedSummary);
+  } catch (error) {
+    console.error("Summary Generation Error:", error);
+    res.status(500).json({ error: "Failed to generate summary" });
+  }
+});
+
 app.get('/', (req, res) => {
   res.send('Backend is working!');
 });
@@ -159,6 +259,18 @@ io.on("connection", (socket) => {
 
   socket.on("ice-candidate", (targetId, candidate) => {
     socket.to(targetId).emit("ice-candidate", socket.id, candidate);
+  });
+
+  socket.on("screen-share-started", (rawRoomId) => {
+    const roomId = sanitizeString(rawRoomId, 50);
+    if (!roomId) return;
+    socket.to(roomId).emit("user-screen-share-started", socket.id);
+  });
+
+  socket.on("screen-share-stopped", (rawRoomId) => {
+    const roomId = sanitizeString(rawRoomId, 50);
+    if (!roomId) return;
+    socket.to(roomId).emit("user-screen-share-stopped", socket.id);
   });
 
   socket.on("chat-message", (rawRoomId, rawMessage) => {

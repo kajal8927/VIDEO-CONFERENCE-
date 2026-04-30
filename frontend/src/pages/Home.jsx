@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Video, Users, ArrowRight, Clock } from "lucide-react";
 import { supabase } from "../lib/supabase";
@@ -8,11 +8,19 @@ const Home = () => {
   const { roomId: sharedRoomId } = useParams();
 
   const [userName, setUserName] = useState("");
-  const [roomId, setRoomId] = useState(sharedRoomId || "");
+  const [roomId, setRoomId] = useState("");
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    if (sharedRoomId) {
+      setRoomId(sharedRoomId.trim());
+    }
+  }, [sharedRoomId]);
+
   const handleCreateRoom = async () => {
-    if (!userName.trim()) {
+    const cleanUserName = userName.trim();
+
+    if (!cleanUserName) {
       alert("Please enter your name first.");
       return;
     }
@@ -35,11 +43,16 @@ const Home = () => {
       }
 
       navigate(`/room/${newRoomId}`, {
-        state: { userName: userName.trim() },
+        replace: true,
+        state: { userName: cleanUserName },
       });
     } catch (err) {
       console.error("Unexpected create room error:", err);
-      alert(`Something went wrong: ${err.message || "Please check your connection."}`);
+      alert(
+        `Something went wrong: ${
+          err.message || "Please check your connection."
+        }`
+      );
     } finally {
       setLoading(false);
     }
@@ -48,12 +61,15 @@ const Home = () => {
   const handleJoinRoom = async (e) => {
     e.preventDefault();
 
-    if (!userName.trim()) {
+    const cleanUserName = userName.trim();
+    const cleanRoomId = roomId.trim();
+
+    if (!cleanUserName) {
       alert("Please enter your name first.");
       return;
     }
 
-    if (!roomId.trim()) {
+    if (!cleanRoomId) {
       alert("Please enter a Room ID.");
       return;
     }
@@ -61,21 +77,34 @@ const Home = () => {
     try {
       setLoading(true);
 
-      const cleanRoomId = roomId.trim();
-
       const { data, error } = await supabase
         .from("meetings")
-        .select("*")
+        .select("id, room_code, status")
         .eq("room_code", cleanRoomId)
         .maybeSingle();
 
-      if (error || !data) {
+      if (error) {
+        console.error("Room lookup error:", error);
+        alert("Could not verify room. Please try again.");
+        return;
+      }
+
+      if (!data) {
         alert("Room not found.");
         return;
       }
 
+      if (data.status && data.status !== "active") {
+        alert("This meeting has ended.");
+        return;
+      }
+
       navigate(`/room/${cleanRoomId}`, {
-        state: { userName: userName.trim() },
+        replace: true,
+        state: {
+          userName: cleanUserName,
+          joinedByRoomId: true,
+        },
       });
     } catch (err) {
       console.error("Unexpected join room error:", err);
@@ -106,6 +135,7 @@ const Home = () => {
               value={userName}
               onChange={(e) => setUserName(e.target.value)}
               className="glass-input"
+              disabled={loading}
             />
           </div>
 
@@ -133,6 +163,7 @@ const Home = () => {
               value={roomId}
               onChange={(e) => setRoomId(e.target.value)}
               className="glass-input"
+              disabled={loading}
             />
 
             <button type="submit" className="btn-secondary" disabled={loading}>

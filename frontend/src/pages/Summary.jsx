@@ -11,44 +11,40 @@ const Summary = () => {
   // Data from Room.jsx
   const { messages = [], speakingStats = {}, participants = [], meetingDuration = 0, roomId } = location.state || {};
 
-  const generateSummary = () => {
+  const generateSummary = async () => {
     setIsGenerating(true);
-    // Simulate API delay
-    setTimeout(() => {
-      // Create simulated AI summary based on data
-      const spokenNames = Object.values(speakingStats)
-        .filter((s) => s.totalSpeakingTime > 3000)
-        .map((s) => s.userName);
-
-      const chatTopics =
-        messages.length > 0
-          ? messages
-              .map((m) => m.text)
-              .slice(0, 3)
-              .join(", ")
-          : "general topics";
-
-      setSummaryData({
-        paragraph: `This meeting lasted for ${Math.floor(
-          meetingDuration / 60
-        )} minutes and ${
-          meetingDuration % 60
-        } seconds. Key participants included ${
-          spokenNames.length > 0 ? spokenNames.join(", ") : "everyone"
-        }. The discussion mainly revolved around ${chatTopics}. Overall, it was a highly productive session with great engagement from the team.`,
-        keyPoints: [
-          "Discussed the current project milestones and overall progress.",
-          "Reviewed the recent metrics and identified areas for improvement.",
-          "Addressed blockers mentioned in the chat effectively.",
-        ],
-        actionItems: [
-          "Update the project documentation based on today's feedback.",
-          "Schedule a follow-up sync for next week.",
-          "Review and merge the pending pull requests.",
-        ],
+    
+    try {
+      const SERVER_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3000";
+      const response = await fetch(`${SERVER_URL}/api/summary`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          roomId,
+          messages,
+          speakingStats
+        })
       });
+
+      if (!response.ok) {
+        throw new Error("Failed to generate summary");
+      }
+
+      const data = await response.json();
+      setSummaryData({
+        paragraph: data.summary || "Summary generated successfully.",
+        keyPoints: data.keyPoints || [],
+        actionItems: data.actionItems || [],
+        participantInsights: data.participantInsights || []
+      });
+    } catch (error) {
+      console.error("Error generating summary:", error);
+      alert("Failed to generate summary. Please try again.");
+    } finally {
       setIsGenerating(false);
-    }, 2500);
+    }
   };
 
   if (!location.state) {

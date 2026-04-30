@@ -111,6 +111,7 @@ const Room = () => {
   const socketIdRef = useRef(null);
   const cameraTrackRef = useRef(null);
   const screenTrackRef = useRef(null);
+  const originalStreamRef = useRef(null);
 
   const { streams, disconnectAll, replaceVideoTrack } = useWebRTC(
     socket,
@@ -202,6 +203,10 @@ const Room = () => {
           video: true,
           audio: true,
         });
+        originalStreamRef.current = stream;
+cameraTrackRef.current = stream.getVideoTracks()[0];
+
+setLocalStream(stream);
 
         cameraTrackRef.current = stream.getVideoTracks()[0];
         setLocalStream(stream);
@@ -424,6 +429,10 @@ const Room = () => {
 
     setLocalStream(restoredStream);
     setIsScreenSharing(false);
+    
+    if (socketRef.current) {
+      socketRef.current.emit("screen-share-stopped", roomId);
+    }
   };
 
   const toggleScreenShare = async () => {
@@ -448,6 +457,10 @@ const Room = () => {
 
         setLocalStream(newStream);
         setIsScreenSharing(true);
+        
+        if (socketRef.current) {
+          socketRef.current.emit("screen-share-started", roomId);
+        }
 
         screenTrack.onended = async () => {
           await stopScreenShare();
