@@ -8,6 +8,10 @@ const VideoGrid = ({
   speakingStats = {},
   localSocketId,
   raisedHands = {},
+  participants = [],
+  mutedUsers = {},
+  cameraOffUsers = {},
+  localIsHost = false,
 }) => {
   const allStreams = {
     ...(localSocketId
@@ -25,16 +29,25 @@ const VideoGrid = ({
   return (
     <div className="video-grid">
       {Object.entries(allStreams).map(
-        ([socketId, { stream, userName: name, isLocal }]) => (
-          <VideoTile
-            key={socketId}
-            stream={stream}
-            userName={name || "Guest"}
-            isLocal={!!isLocal}
-            speakingStats={speakingStats?.[socketId] ?? {}}
-            raisedHand={!!raisedHands?.[socketId]}
-          />
-        )
+        ([socketId, { stream, isLocal }]) => {
+          const participant = participants.find((p) => p.socketId === socketId);
+          const realName = isLocal ? userName : participant?.userName || "Guest";
+          const isParticipantHost = isLocal ? localIsHost : !!participant?.isHost;
+
+          return (
+            <VideoTile
+              key={socketId}
+              stream={stream}
+              userName={realName}
+              isLocal={!!isLocal}
+              speakingStats={speakingStats?.[socketId] ?? {}}
+              raisedHand={!!raisedHands?.[socketId]}
+              isRemoteMuted={!!mutedUsers?.[socketId]}
+              isCameraOff={!!cameraOffUsers?.[socketId]}
+              isHost={isParticipantHost}
+            />
+          );
+        }
       )}
     </div>
   );

@@ -4,7 +4,7 @@ export class AudioAnalyzer {
     this.onSpeakingStateChange = onSpeakingStateChange;
     this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
     this.analyser = this.audioContext.createAnalyser();
-    
+
     // Configure analyser
     this.analyser.minDecibels = -70;
     this.analyser.maxDecibels = -10;
@@ -21,13 +21,13 @@ export class AudioAnalyzer {
 
     // A threshold value that can be adjusted. 
     // Average volume above this number means speaking.
-    this.threshold = 15; 
+    this.threshold = 15;
   }
 
   start() {
     const checkAudioLevel = () => {
       this.analyser.getByteFrequencyData(this.dataArray);
-      
+
       let sum = 0;
       for (let i = 0; i < this.dataArray.length; i++) {
         sum += this.dataArray[i];

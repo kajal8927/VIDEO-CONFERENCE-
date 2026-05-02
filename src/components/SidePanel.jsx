@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Hand, MicOff, UserMinus } from 'lucide-react';
+import { Hand, MicOff, UserMinus, VideoOff } from 'lucide-react';
 import Chat from './Chat';
 
 const SidePanel = ({
@@ -12,6 +12,7 @@ const SidePanel = ({
   isHost,
   onMuteParticipant,
   onRemoveParticipant,
+  onCameraOffParticipant,
 }) => {
 
 
@@ -98,6 +99,13 @@ const SidePanel = ({
                           <MicOff size={16} />
                         </button>
                         <button
+                          onClick={() => onCameraOffParticipant(p.socketId)}
+                          style={{ background: 'transparent', border: 'none', color: '#f59e0b', cursor: 'pointer' }}
+                          title="Turn off Camera"
+                        >
+                          <VideoOff size={16} />
+                        </button>
+                        <button
                           onClick={() => onRemoveParticipant(p.socketId)}
                           style={{ background: 'transparent', border: 'none', color: '#ef4444', cursor: 'pointer' }}
                           title="Remove Participant"
@@ -131,15 +139,8 @@ const SidePanel = ({
         >
           Participants
         </button>
-        <button 
-          className={`tab-btn ${activeTab === 'analytics' ? 'active' : ''}`}
-          onClick={() => setActiveTab('analytics')}
-        >
-          Analytics
-        </button>
       </div>
       {activeTab === 'chat' && <Chat messages={messages} sendMessage={sendMessage} activeTab={activeTab} />}
-      {activeTab === 'analytics' && renderAnalytics()}
       {activeTab === 'participants' && renderParticipants()}
     </div>
   );

@@ -13,7 +13,6 @@ import {
   VideoOff,
   PhoneOff,
   MessageSquare,
-  BarChart2,
   Hand,
   MonitorUp,
   Users,
@@ -23,21 +22,115 @@ import {
   Unlock,
 } from "lucide-react";
 
-const SERVER_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3000";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+const SERVER_URL = API_URL.replace(/\/api$/, "");
 
 const Room = () => {
   const { roomId } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
-  const userName = location.state?.userName || "Anonymous";
+  const [userName, setUserName] = useState("");
+  const userNameRef = useRef("");
+  const [nameReady, setNameReady] = useState(false);
+  const [tempName, setTempName] = useState(userNameRef.current || "");
+  useEffect(() => {
+    if (userNameRef.current && !tempName) {
+      setTempName(userNameRef.current);
+    }
+  }, [userNameRef.current]);
+  // Resolve the display name using Supabase, localStorage, or manual input
+  const resolveUserName = async () => {
+    // 1. Manual typed name from Home.jsx or locked in current session (HIGHEST)
+    if (location.state?.userName) {
+      const manualName = location.state.userName;
+      sessionStorage.setItem("lockedUserName", manualName);
+      localStorage.setItem("userName", manualName);
+      return manualName;
+    }
+
+    const lockedName = sessionStorage.getItem("lockedUserName");
+    if (lockedName) {
+      return lockedName;
+    }
+
+    // 2. Supabase session
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session?.user) {
+      const user = session.user;
+      const nameFromSupabase = (user.email ? user.email.split("@")[0] : "") || user.user_metadata?.full_name;
+      
+      if (nameFromSupabase) {
+        // Overwrite any stale localStorage name with the authentic Supabase name
+        localStorage.setItem("userName", nameFromSupabase);
+        return nameFromSupabase;
+      }
+      
+      // Never fall back to localStorage if there is an active Supabase session
+      return "Guest";
+    }
+
+    // 3. localStorage fallback ONLY if there is no active session
+    const lsKeys = ["userName", "username", "name", "email"];
+    for (const key of lsKeys) {
+      const val = localStorage.getItem(key);
+      if (val) {
+        if (key === "email" && val.includes("@")) {
+          return val.split("@")[0];
+        }
+        return val;
+      }
+    }
+    
+    // No name found
+    return null;
+  };
+
+  // Initial name resolution effect
+  useEffect(() => {
+    const initName = async () => {
+      const resolved = await resolveUserName();
+      if (resolved) {
+        setUserName(resolved);
+        userNameRef.current = resolved;
+        setNameReady(true);
+        // persist in localStorage for future sessions
+        localStorage.setItem("userName", resolved);
+      } else {
+        setNameReady(false);
+      }
+    };
+    initName();
+  }, []);
 
   const [socket, setSocket] = useState(null);
   const socketRef = useRef(null);
 
   const [localStream, setLocalStream] = useState(null);
   const [isMuted, setIsMuted] = useState(false);
+  const [mutedUsers, setMutedUsers] = useState({});
   const [isVideoOff, setIsVideoOff] = useState(false);
+  const [cameraOffUsers, setCameraOffUsers] = useState({});
   const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [hasJoined, setHasJoined] = useState(false);
+  const [isWaiting, setIsWaiting] = useState(true);
+  const [isDenied, setIsDenied] = useState(false);
+  const [joinRequests, setJoinRequests] = useState([]);
+  const [showInfoPanel, setShowInfoPanel] = useState(false);
+  const [showLinkToast, setShowLinkToast] = useState(false);
+  const [isMobilePanelOpen, setIsMobilePanelOpen] = useState(false);
+
+  const meetingLink = `${window.location.origin}/room/${roomId}`;
+  const handleCopyLink = async () => {
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: "NovaMeet", text: "Join my meeting", url: meetingLink }).catch(()=>navigator.clipboard.writeText(meetingLink));
+      } else {
+        await navigator.clipboard.writeText(meetingLink);
+      }
+      setShowLinkToast(true);
+      setTimeout(() => setShowLinkToast(false), 3000);
+    } catch(e) {}
+  };
 
   const [messages, setMessages] = useState([]);
   const messageIdsRef = useRef(new Set());
@@ -46,9 +139,6 @@ const Room = () => {
   const [activeTab, setActiveTab] = useState("chat");
   const [participants, setParticipants] = useState([]);
 
-  // Deduplicate participants by userName for display only.
-  // Keeps the first socket entry per name so host controls still target a valid socketId.
-  // Actual socket connections remain untouched — WebRTC is unaffected.
   const uniqueParticipants = useMemo(() => {
     const seen = new Set();
     return participants.filter((p) => {
@@ -60,42 +150,63 @@ const Room = () => {
 
   const [isHost, setIsHost] = useState(false);
   const [isRoomLocked, setIsRoomLocked] = useState(false);
-
   const [isHandRaised, setIsHandRaised] = useState(false);
   const [raisedHands, setRaisedHands] = useState({});
-
   const [floatingReactions, setFloatingReactions] = useState([]);
   const [showReactionPicker, setShowReactionPicker] = useState(false);
-
   const [mediaError, setMediaError] = useState(null);
   const [connectionError, setConnectionError] = useState(null);
   const [retryCount, setRetryCount] = useState(0);
-
   const [meetingDuration, setMeetingDuration] = useState(0);
+
+  const audioAnalyzerRef = useRef(null);
+  const meetingIdRef = useRef(null);
+  const socketIdRef = useRef(null);
+  const cameraTrackRef = useRef(null);
+  const screenTrackRef = useRef(null);
+  const originalStreamRef = useRef(null);
+
+  const latestDataRef = useRef({
+    messages: [],
+    speakingStats: {},
+    participants: [],
+    meetingDuration: 0,
+  });
+
+  const { streams, disconnectAll, replaceVideoTrack } = useWebRTC(
+    socket,
+    roomId,
+    localStream
+  );
 
   useEffect(() => {
     const timer = setInterval(() => {
       setMeetingDuration((prev) => prev + 1);
     }, 1000);
+
     return () => clearInterval(timer);
   }, []);
 
-  const latestDataRef = useRef({ messages: [], speakingStats: {}, participants: [], meetingDuration: 0 });
-
   useEffect(() => {
-    latestDataRef.current = { messages, speakingStats, participants, meetingDuration };
+    latestDataRef.current = {
+      messages,
+      speakingStats,
+      participants,
+      meetingDuration,
+    };
   }, [messages, speakingStats, participants, meetingDuration]);
 
   const navigateToSummary = () => {
     const data = latestDataRef.current;
-    navigate("/summary", { 
-      state: { 
-        roomId, 
-        messages: data.messages, 
-        speakingStats: data.speakingStats, 
-        participants: data.participants, 
-        meetingDuration: data.meetingDuration 
-      } 
+
+    navigate("/summary", {
+      state: {
+        roomId,
+        messages: data.messages,
+        speakingStats: data.speakingStats,
+        participants: data.participants,
+        meetingDuration: data.meetingDuration,
+      },
     });
   };
 
@@ -103,20 +214,9 @@ const Room = () => {
     const h = Math.floor(totalSeconds / 3600).toString().padStart(2, "0");
     const m = Math.floor((totalSeconds % 3600) / 60).toString().padStart(2, "0");
     const s = (totalSeconds % 60).toString().padStart(2, "0");
+
     return `${h}:${m}:${s}`;
   };
-
-  const audioAnalyzerRef = useRef(null);
-  const meetingIdRef = useRef(null);
-  const socketIdRef = useRef(null);
-  const cameraTrackRef = useRef(null);
-  const screenTrackRef = useRef(null);
-
-  const { streams, disconnectAll, replaceVideoTrack } = useWebRTC(
-    socket,
-    roomId,
-    localStream
-  );
 
   const getMeeting = async () => {
     const { data, error } = await supabase
@@ -138,7 +238,7 @@ const Room = () => {
 
     const { error } = await supabase.from("meeting_participants").insert({
       meeting_id: meetingId,
-      guest_name: userName,
+      guest_name: userNameRef.current,
       socket_id: socketId,
     });
 
@@ -181,7 +281,7 @@ const Room = () => {
 
     const { error } = await supabase.from("speaking_stats").insert({
       meeting_id: meetingId,
-      participant_name: userName,
+      participant_name: userNameRef.current,
       total_seconds: Math.round((myStats.totalSpeakingTime || 0) / 1000),
       percentage,
     });
@@ -189,25 +289,43 @@ const Room = () => {
     if (error) console.error("Speaking stats save error:", error);
   };
 
+  // 1. Initialize Media (Runs on mount so Pre-Join has camera preview)
   useEffect(() => {
-    let currentSocket = null;
-    let connectionTimer = null;
-
-    const setupRoom = async () => {
+    let stream;
+    const initMedia = async () => {
       try {
         setMediaError(null);
-        setConnectionError(null);
-
-        const stream = await navigator.mediaDevices.getUserMedia({
+        stream = await navigator.mediaDevices.getUserMedia({
           video: true,
           audio: true,
         });
-
+        originalStreamRef.current = stream;
         cameraTrackRef.current = stream.getVideoTracks()[0];
         setLocalStream(stream);
+      } catch (err) {
+        console.error("Media setup error:", err);
+        setMediaError(err);
+      }
+    };
+    initMedia();
+
+    return () => {
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, [retryCount]);
+
+  // 2. Connect Socket (Runs when user clicks Join Now)
+  useEffect(() => {
+    if (!hasJoined || !localStream) return;
+
+    const connectSocket = async () => {
+      try {
+        setConnectionError(null);
+        setUserName(userNameRef.current);
 
         const meeting = await getMeeting();
-
         if (!meeting) {
           alert("Meeting not found.");
           navigate("/");
@@ -216,7 +334,9 @@ const Room = () => {
 
         meetingIdRef.current = meeting.id;
 
-        currentSocket = io(SERVER_URL, {
+        const currentSocket = io(SERVER_URL, {
+          transports: ["websocket", "polling"],
+          reconnection: true,
           reconnectionAttempts: 5,
           timeout: 10000,
         });
@@ -224,7 +344,7 @@ const Room = () => {
         socketRef.current = currentSocket;
         setSocket(currentSocket);
 
-        connectionTimer = setTimeout(() => {
+        const connectionTimer = setTimeout(() => {
           if (!currentSocket.connected) {
             setConnectionError("Could not connect to signaling server.");
           }
@@ -233,9 +353,38 @@ const Room = () => {
         currentSocket.on("connect", async () => {
           clearTimeout(connectionTimer);
           socketIdRef.current = currentSocket.id;
+          currentSocket.emit("request-join-room", roomId, userNameRef.current);
+        });
 
+        currentSocket.on("user-admitted", async () => {
+          setIsWaiting(false);
+          setIsDenied(false);
           await saveParticipant(meeting.id, currentSocket.id);
-          currentSocket.emit("join-room", roomId, userName);
+          currentSocket.emit("join-room", roomId, userNameRef.current);
+          
+          currentSocket.emit("user-toggle-mute", roomId, { socketId: currentSocket.id, isMuted: isMuted });
+          currentSocket.emit("user-toggle-video", roomId, { socketId: currentSocket.id, isVideoOff: isVideoOff });
+        });
+
+        currentSocket.on("user-denied", () => {
+          setIsWaiting(false);
+          setIsDenied(true);
+        });
+        
+        currentSocket.on("join-request-received", (req) => {
+          setJoinRequests(prev => {
+            if (prev.some(r => r.socketId === req.socketId)) return prev;
+            return [...prev, req];
+          });
+        });
+        
+        currentSocket.on("camera-off-requested", () => {
+          const videoTrack = localStream?.getVideoTracks()[0];
+          if (videoTrack && videoTrack.enabled) {
+            videoTrack.enabled = false;
+            setIsVideoOff(true);
+            currentSocket.emit("user-toggle-video", roomId, { socketId: currentSocket.id, isVideoOff: true });
+          }
         });
 
         currentSocket.on("connect_error", (err) => {
@@ -245,15 +394,9 @@ const Room = () => {
 
         currentSocket.on("chat-message", (senderId, message) => {
           if (senderId === currentSocket.id) return;
-
-          const messageId =
-            message?.id ||
-            `${senderId}-${message?.time || ""}-${message?.text || message}`;
-
+          const messageId = message?.id || `${senderId}-${message?.time || ""}-${message?.text || message}`;
           if (messageIdsRef.current.has(messageId)) return;
-
           messageIdsRef.current.add(messageId);
-
           setMessages((prev) => [
             ...prev,
             {
@@ -269,134 +412,90 @@ const Room = () => {
 
         currentSocket.on("host-status", (status) => setIsHost(status));
         currentSocket.on("room-lock-status", (status) => setIsRoomLocked(status));
-
-        currentSocket.on("speaking-stats", (stats) => {
-          setSpeakingStats(stats);
-        });
-
-        // Backend sends full participant list via 'participants-update' (single source of truth)
-        currentSocket.on("participants-update", (list) => {
-          setParticipants(list);
-        });
-
-        currentSocket.on("room-users", (users) => {
-          console.log("Initial room users (IDs):", users);
-          // We rely on participants-update for the full objects list.
-        });
-
-        currentSocket.on("user-joined", (socketId, name) => {
-          console.log(`User joined: ${name} (${socketId})`);
-          // State is handled by participants-update broadcast from backend.
-        });
-
+        currentSocket.on("speaking-stats", (stats) => setSpeakingStats(stats));
+        currentSocket.on("participants-update", (list) => setParticipants(list));
         currentSocket.on("user-left", (socketId) => {
           setParticipants((prev) => prev.filter((p) => p.socketId !== socketId));
-          console.log(`User left: ${socketId}`);
         });
-
+        currentSocket.on("user-toggle-mute", ({ socketId, isMuted }) => {
+          setMutedUsers((prev) => ({ ...prev, [socketId]: isMuted }));
+        });
+        currentSocket.on("user-toggle-video", ({ socketId, isVideoOff }) => {
+          setCameraOffUsers((prev) => ({ ...prev, [socketId]: isVideoOff }));
+        });
         currentSocket.on("raise-hand-update", ({ socketId, raisedHand }) => {
-          setRaisedHands((prev) => ({
-            ...prev,
-            [socketId]: raisedHand,
-          }));
+          setRaisedHands((prev) => ({ ...prev, [socketId]: raisedHand }));
         });
-
         currentSocket.on("room-locked", () => {
           alert("This room is locked by the host.");
           navigate("/");
         });
-
         currentSocket.on("duplicate-session-closed", () => {
-          alert("Your previous session was closed");
+          alert("Your previous session was closed.");
           currentSocket.disconnect();
           navigate("/", { replace: true });
         });
-
         currentSocket.on("receive-reaction", (data) => {
           setFloatingReactions((prev) => [...prev, data]);
           setTimeout(() => {
-            setFloatingReactions((prev) =>
-              prev.filter((r) => r.id !== data.id)
-            );
+            setFloatingReactions((prev) => prev.filter((r) => r.id !== data.id));
           }, 4000);
         });
-
         currentSocket.on("you-were-removed", () => {
           alert("You were removed by the host.");
           navigateToSummary();
         });
-
         currentSocket.on("meeting-ended-by-host", () => {
           alert("Meeting ended by host.");
           navigateToSummary();
         });
-
         currentSocket.on("mute-requested", () => {
-          alert("Host requested you to mute your microphone.");
+          const audioTrack = localStream?.getAudioTracks()[0];
+          if (audioTrack && audioTrack.enabled) {
+            audioTrack.enabled = false;
+            setIsMuted(true);
+            currentSocket.emit("user-toggle-mute", roomId, { socketId: currentSocket.id, isMuted: true });
+          }
         });
 
-        const analyzer = new AudioAnalyzer(stream, (isSpeaking) => {
+        const analyzer = new AudioAnalyzer(localStream, (isSpeaking) => {
           socketRef.current?.emit("speaking-state-change", roomId, isSpeaking);
         });
-
         analyzer.start();
         audioAnalyzerRef.current = analyzer;
+
       } catch (err) {
-        console.error("Media setup error:", err);
-        setMediaError(err);
+        console.error("Socket setup error:", err);
       }
     };
 
-    setupRoom();
+    connectSocket();
 
     return () => {
-      clearTimeout(connectionTimer);
-
       audioAnalyzerRef.current?.stop();
       audioAnalyzerRef.current = null;
 
-      screenTrackRef.current?.stop();
-      screenTrackRef.current = null;
-
-      setLocalStream((prev) => {
-        if (prev) {
-          prev.getTracks().forEach((track) => track.stop());
-        }
-        return null;
-      });
-
-      if (currentSocket) {
-        currentSocket.off("connect");
-        currentSocket.off("connect_error");
-        currentSocket.off("chat-message");
-        currentSocket.off("host-status");
-        currentSocket.off("room-lock-status");
-        currentSocket.off("speaking-stats");
-        currentSocket.off("participants-update");
-        currentSocket.off("room-users");
-        currentSocket.off("user-joined");
-        currentSocket.off("user-left");
-        currentSocket.off("receive-reaction");
-        currentSocket.off("raise-hand-update");
-        currentSocket.off("room-locked");
-        currentSocket.off("duplicate-session-closed");
-        currentSocket.off("you-were-removed");
-        currentSocket.off("meeting-ended-by-host");
-        currentSocket.off("mute-requested");
-        currentSocket.disconnect();
+      if (socketRef.current) {
+        socketRef.current.disconnect();
       }
-
       socketRef.current = null;
       setSocket(null);
     };
-  }, [roomId, userName, navigate, retryCount]);
-
+  }, [hasJoined, roomId, navigate, localStream]);
   const toggleMute = () => {
     const audioTrack = localStream?.getAudioTracks()[0];
     if (!audioTrack) return;
 
     audioTrack.enabled = !audioTrack.enabled;
-    setIsMuted(!audioTrack.enabled);
+    const nextMuted = !audioTrack.enabled;
+    setIsMuted(nextMuted);
+
+    if (socketRef.current) {
+      socketRef.current.emit("user-toggle-mute", roomId, {
+        socketId: socketRef.current.id,
+        isMuted: nextMuted,
+      });
+    }
   };
 
   const toggleVideo = () => {
@@ -424,6 +523,8 @@ const Room = () => {
 
     setLocalStream(restoredStream);
     setIsScreenSharing(false);
+
+    socketRef.current?.emit("screen-share-stopped", roomId);
   };
 
   const toggleScreenShare = async () => {
@@ -448,6 +549,8 @@ const Room = () => {
 
         setLocalStream(newStream);
         setIsScreenSharing(true);
+
+        socketRef.current?.emit("screen-share-started", roomId);
 
         screenTrack.onended = async () => {
           await stopScreenShare();
@@ -479,16 +582,15 @@ const Room = () => {
     await saveSpeakingStats();
     await updateParticipantLeave();
 
-    if (socketRef.current) {
-      socketRef.current.emit("raise-hand", roomId, false);
+    socketRef.current?.emit("raise-hand", roomId, false);
+
+    if (isScreenSharing) {
+      await stopScreenShare();
     }
 
-    await stopScreenShare();
     disconnectAll();
 
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-    }
+    socketRef.current?.disconnect();
 
     navigateToSummary();
   };
@@ -500,7 +602,7 @@ const Room = () => {
     const message = {
       id: `msg-${Date.now()}-${Math.random()}`,
       text: cleanText,
-      senderName: userName,
+      senderName: userNameRef.current,
       time: new Date().toISOString(),
     };
 
@@ -521,7 +623,7 @@ const Room = () => {
     if (meetingIdRef.current) {
       const { error } = await supabase.from("chat_messages").insert({
         meeting_id: meetingIdRef.current,
-        sender_name: userName,
+        sender_name: userNameRef.current,
         message: cleanText,
       });
 
@@ -530,10 +632,148 @@ const Room = () => {
   };
 
   const sendReaction = (emoji) => {
-    socketRef.current?.emit("send-reaction", roomId, emoji, userName);
+    socketRef.current?.emit("send-reaction", roomId, emoji, userNameRef.current);
     setShowReactionPicker(false);
   };
 
+  // Pre-Join Screen
+    // Denied Screen
+  if (isDenied) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: '#0f0f13', color: 'white', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+        <h2 style={{ color: '#ef4444', marginBottom: '16px' }}>Host denied your request</h2>
+        <p style={{ color: '#aaa', marginBottom: '24px' }}>You cannot join this meeting.</p>
+        <button className="btn-secondary" onClick={() => navigate("/")}>Go to Home</button>
+      </div>
+    );
+  }
+
+  // Waiting Room Screen
+  if (hasJoined && isWaiting) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: '#0f0f13', color: 'white', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+        <h2 style={{ fontSize: '24px', marginBottom: '16px' }}>Waiting for host to admit you...</h2>
+        <p style={{ color: '#aaa', marginBottom: '32px' }}>Room: {roomId}</p>
+        
+        <div style={{ width: 64, height: 64, borderRadius: '50%', border: '4px solid #4f46e5', borderTopColor: 'transparent', animation: 'spin 1s linear infinite', marginBottom: '32px' }}></div>
+        <style>{`@keyframes spin { 100% { transform: rotate(360deg); } }`}</style>
+        
+        <button onClick={() => {
+          if (socketRef.current) socketRef.current.disconnect();
+          navigate("/");
+        }} style={{ padding: '12px 24px', background: '#ef4444', color: 'white', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: 'bold' }}>
+          Leave
+        </button>
+      </div>
+    );
+  }
+
+  if (!hasJoined) {
+    return (
+      <div className="pre-join-container" style={{ display: 'flex', minHeight: '100vh', background: '#0f0f13', color: 'white', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+        <div style={{ display: 'flex', gap: '40px', flexWrap: 'wrap', maxWidth: '1000px', width: '100%' }}>
+          {/* Camera Preview */}
+          <div style={{ flex: '1 1 500px', background: '#1e1e2e', borderRadius: '16px', overflow: 'hidden', position: 'relative', aspectRatio: '16/9', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            {isVideoOff ? (
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ width: 80, height: 80, borderRadius: '50%', background: '#3b3b55', margin: '0 auto 10px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <span style={{ fontSize: 32 }}>{tempName ? tempName[0]?.toUpperCase() : 'U'}</span>
+                </div>
+                <p>Camera is off</p>
+              </div>
+            ) : (
+              <video 
+                autoPlay 
+                playsInline 
+                muted 
+                ref={(ref) => {
+                  if (ref && localStream) ref.srcObject = localStream;
+                }}
+                style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }}
+              />
+            )}
+            
+            <div style={{ position: 'absolute', bottom: 16, left: 0, right: 0, display: 'flex', justifyContent: 'center', gap: '16px' }}>
+              <button onClick={toggleMute} style={{ width: 48, height: 48, borderRadius: '50%', background: isMuted ? '#ff4d4f' : 'rgba(0,0,0,0.6)', color: 'white', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
+              </button>
+              <button onClick={toggleVideo} style={{ width: 48, height: 48, borderRadius: '50%', background: isVideoOff ? '#ff4d4f' : 'rgba(0,0,0,0.6)', color: 'white', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                {isVideoOff ? <VideoOff size={24} /> : <Video size={24} />}
+              </button>
+            </div>
+          </div>
+
+          {/* Join Form */}
+          <div style={{ flex: '1 1 300px', display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '20px' }}>
+            <h1 style={{ fontSize: '32px', marginBottom: '8px' }}>Ready to join?</h1>
+            <p style={{ color: '#aaa', marginBottom: '24px' }}>Room: {roomId}</p>
+
+            <div style={{ marginBottom: '24px', background: '#1e1e2e', padding: '16px', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#ccc', marginRight: '16px' }}>
+                {meetingLink}
+              </div>
+              <button onClick={handleCopyLink} style={{ background: 'transparent', border: 'none', color: '#6366f1', cursor: 'pointer', fontWeight: 'bold' }}>
+                {showLinkToast ? "Copied!" : "Copy link"}
+              </button>
+            </div>
+
+            <div style={{ marginBottom: '24px' }}>
+              <input
+                type="text"
+                placeholder="Your name"
+                value={tempName}
+                onChange={(e) => setTempName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    const trimmed = tempName.trim();
+                    if (trimmed) {
+                      setUserName(trimmed);
+                      userNameRef.current = trimmed;
+                      localStorage.setItem("userName", trimmed);
+                      sessionStorage.setItem("lockedUserName", trimmed);
+                      setNameReady(true);
+                      setHasJoined(true);
+                    }
+                  }
+                }}
+                style={{
+                  width: "100%", padding: "16px", fontSize: 16, borderRadius: 8,
+                  border: "1px solid #444", background: "#2a2a3e", color: "#fff",
+                  outline: "none", boxSizing: "border-box"
+                }}
+                autoFocus={!nameReady}
+              />
+            </div>
+
+            <button
+              onClick={() => {
+                const trimmed = tempName.trim();
+                if (trimmed) {
+                  setUserName(trimmed);
+                  userNameRef.current = trimmed;
+                  localStorage.setItem("userName", trimmed);
+                  sessionStorage.setItem("lockedUserName", trimmed);
+                  setNameReady(true);
+                  setHasJoined(true);
+                } else if (nameReady && userNameRef.current) {
+                  setHasJoined(true);
+                } else {
+                  alert("Please enter a name");
+                }
+              }}
+              style={{
+                width: "100%", padding: "16px", fontSize: 16, fontWeight: 600,
+                borderRadius: 8, border: "none", cursor: "pointer",
+                background: "linear-gradient(135deg, #6366f1, #8b5cf6)", color: "#fff"
+              }}
+            >
+              Join Now
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
   if (mediaError) {
     return (
       <div className="error-screen">
@@ -597,6 +837,7 @@ const Room = () => {
               <Clock size={16} />
               <span>{formatTime(meetingDuration)}</span>
             </div>
+
             <div className="stat-badge count-badge">
               <Users size={16} />
               <span>Participants: {uniqueParticipants.length || 1}</span>
@@ -610,7 +851,6 @@ const Room = () => {
           )}
         </div>
 
-        {/* Floating Reactions */}
         <div className="floating-reactions-container">
           {floatingReactions.map((r) => (
             <div key={r.id} className="floating-reaction">
@@ -623,13 +863,36 @@ const Room = () => {
         <VideoGrid
           localStream={localStream}
           remoteStreams={streams}
-          userName={userName}
+          userName={userNameRef.current}
           speakingStats={speakingStats}
           localSocketId={socket?.id}
           raisedHands={raisedHands}
+          participants={participants}
+          mutedUsers={mutedUsers}
         />
 
-        <div className="control-bar">
+                {/* Join Requests Toasts */}
+        {joinRequests.length > 0 && (
+          <div style={{ position: 'absolute', top: 80, right: 24, zIndex: 1000, display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {joinRequests.map(req => (
+              <div key={req.socketId} style={{ background: '#1e1e2e', padding: '16px', borderRadius: '12px', border: '1px solid #4f46e5', boxShadow: '0 8px 32px rgba(0,0,0,0.5)', width: '300px' }}>
+                <p style={{ margin: '0 0 12px 0', color: 'white', fontWeight: 'bold' }}>{req.userName} wants to join</p>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button onClick={() => {
+                    socketRef.current?.emit("admit-user", roomId, req.socketId);
+                    setJoinRequests(prev => prev.filter(r => r.socketId !== req.socketId));
+                  }} style={{ flex: 1, padding: '8px', background: '#10b981', color: 'white', borderRadius: '6px', border: 'none', cursor: 'pointer', fontWeight: 'bold' }}>Admit</button>
+                  <button onClick={() => {
+                    socketRef.current?.emit("deny-user", roomId, req.socketId);
+                    setJoinRequests(prev => prev.filter(r => r.socketId !== req.socketId));
+                  }} style={{ flex: 1, padding: '8px', background: '#ef4444', color: 'white', borderRadius: '6px', border: 'none', cursor: 'pointer', fontWeight: 'bold' }}>Deny</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+<div className="control-bar">
           <button
             className={`control-btn ${isMuted ? "danger" : ""}`}
             onClick={toggleMute}
@@ -662,6 +925,7 @@ const Room = () => {
             >
               <Smile size={24} />
             </button>
+
             {showReactionPicker && (
               <div className="reaction-picker">
                 {["👍", "👏", "❤️", "😂", "🎉"].map((emoji) => (
@@ -673,6 +937,25 @@ const Room = () => {
                     {emoji}
                   </button>
                 ))}
+              </div>
+            )}
+          </div>
+
+          <div className="reaction-container" style={{ position: "relative" }}>
+            <button
+              className="control-btn"
+              onClick={() => setShowInfoPanel(!showInfoPanel)}
+              title="Meeting Info"
+            >
+              <span style={{fontWeight: 'bold', fontSize: '18px'}}>i</span>
+            </button>
+            {showInfoPanel && (
+              <div style={{ position: 'absolute', bottom: '100%', left: 0, marginBottom: '12px', background: '#1e1e2e', padding: '16px', borderRadius: '12px', width: '250px', boxShadow: '0 4px 12px rgba(0,0,0,0.5)', zIndex: 10, textAlign: 'left' }}>
+                <h4 style={{ margin: '0 0 12px 0', color: 'white' }}>Meeting Info</h4>
+                <p style={{ margin: '0 0 8px 0', color: '#ccc', fontSize: '14px', wordBreak: 'break-all' }}>Room ID: {roomId}</p>
+                <button onClick={handleCopyLink} style={{ background: '#4f46e5', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '6px', cursor: 'pointer', width: '100%' }}>
+                  {showLinkToast ? "Copied!" : "Copy Joining Info"}
+                </button>
               </div>
             )}
           </div>
@@ -709,38 +992,46 @@ const Room = () => {
           </button>
 
           <div className="mobile-tabs">
-            <button className={`control-btn ${activeTab === "chat" ? "active" : ""}`} onClick={() => setActiveTab("chat")}>
+            <button
+              className={`control-btn ${activeTab === "chat" ? "active" : ""}`}
+              onClick={() => setActiveTab("chat")}
+            >
               <MessageSquare size={24} />
             </button>
 
             <button
-              className={`control-btn ${activeTab === "participants" ? "active" : ""}`}
+              className={`control-btn ${
+                activeTab === "participants" ? "active" : ""
+              }`}
               onClick={() => setActiveTab("participants")}
             >
               <Users size={24} />
-            </button>
-
-            <button
-              className={`control-btn ${activeTab === "analytics" ? "active" : ""}`}
-              onClick={() => setActiveTab("analytics")}
-            >
-              <BarChart2 size={24} />
             </button>
           </div>
         </div>
       </div>
 
-      <SidePanel
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        messages={messages}
-        sendMessage={sendMessage}
-        speakingStats={speakingStats}
-        participants={uniqueParticipants}
-        isHost={isHost}
-        onMuteParticipant={(id) => socketRef.current?.emit("host-mute-participant", roomId, id)}
-        onRemoveParticipant={(id) => socketRef.current?.emit("host-remove-participant", roomId, id)}
-      />
+      {isMobilePanelOpen && <button className="mobile-panel-close" onClick={() => setIsMobilePanelOpen(false)} style={{position: 'absolute', bottom: '50vh', zIndex: 101, left: 0, right: 0}}>Close Panel</button>}
+      <div className={`side-panel-wrapper ${isMobilePanelOpen ? 'open' : ''}`} style={{ display: 'contents' }}>
+        <SidePanel
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          messages={messages}
+          sendMessage={sendMessage}
+          speakingStats={speakingStats}
+          participants={uniqueParticipants}
+          isHost={isHost}
+          onMuteParticipant={(id) =>
+            socketRef.current?.emit("host-mute-participant", roomId, id)
+          }
+          onRemoveParticipant={(id) =>
+            socketRef.current?.emit("host-remove-participant", roomId, id)
+          }
+          onCameraOffParticipant={(id) =>
+            socketRef.current?.emit("host-camera-off-participant", roomId, id)
+          }
+        />
+      </div>
     </div>
   );
 };

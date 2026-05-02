@@ -11,44 +11,52 @@ const Summary = () => {
   // Data from Room.jsx
   const { messages = [], speakingStats = {}, participants = [], meetingDuration = 0, roomId } = location.state || {};
 
-  const generateSummary = () => {
+  const generateSummary = async () => {
     setIsGenerating(true);
-    // Simulate API delay
-    setTimeout(() => {
-      // Create simulated AI summary based on data
-      const spokenNames = Object.values(speakingStats)
-        .filter((s) => s.totalSpeakingTime > 3000)
-        .map((s) => s.userName);
 
-      const chatTopics =
-        messages.length > 0
-          ? messages
-              .map((m) => m.text)
-              .slice(0, 3)
-              .join(", ")
-          : "general topics";
+    try {
+      const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+      
+      const payload = {
+        roomId: roomId || "unknown-room",
+        messages: Array.isArray(messages) ? messages : [],
+        speakingStats: typeof speakingStats === "object" && speakingStats !== null ? speakingStats : {},
+        meetingDuration: typeof meetingDuration === "number" ? meetingDuration : 0,
+        participants: Array.isArray(participants) ? participants : []
+      };
 
-      setSummaryData({
-        paragraph: `This meeting lasted for ${Math.floor(
-          meetingDuration / 60
-        )} minutes and ${
-          meetingDuration % 60
-        } seconds. Key participants included ${
-          spokenNames.length > 0 ? spokenNames.join(", ") : "everyone"
-        }. The discussion mainly revolved around ${chatTopics}. Overall, it was a highly productive session with great engagement from the team.`,
-        keyPoints: [
-          "Discussed the current project milestones and overall progress.",
-          "Reviewed the recent metrics and identified areas for improvement.",
-          "Addressed blockers mentioned in the chat effectively.",
-        ],
-        actionItems: [
-          "Update the project documentation based on today's feedback.",
-          "Schedule a follow-up sync for next week.",
-          "Review and merge the pending pull requests.",
-        ],
+      console.log("Summary Request Payload:", payload);
+
+      const response = await fetch(`${API_URL}/summary`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
       });
+
+      console.log("Summary API Response Status:", response.status);
+
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error("Summary API Error Response:", errText);
+        throw new Error(`Failed to generate summary: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log("Summary API Data:", data);
+      setSummaryData({
+        paragraph: data.summary || "Summary generated successfully.",
+        keyPoints: data.keyPoints || [],
+        actionItems: data.actionItems || [],
+        participantInsights: data.participantInsights || []
+      });
+    } catch (error) {
+      console.error("Error generating summary:", error);
+      alert("Failed to generate summary. Please try again.");
+    } finally {
       setIsGenerating(false);
-    }, 2500);
+    }
   };
 
   if (!location.state) {
