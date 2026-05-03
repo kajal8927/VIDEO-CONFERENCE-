@@ -42,9 +42,18 @@ const Home = () => {
         return;
       }
 
+      sessionStorage.setItem("isCreator", "true");
+      sessionStorage.setItem("creatorRoomId", newRoomId);
+      sessionStorage.setItem("lockedUserName", cleanUserName);
+      localStorage.setItem("userName", cleanUserName);
+
       navigate(`/room/${newRoomId}`, {
         replace: true,
-        state: { userName: cleanUserName },
+        state: {
+          userName: cleanUserName,
+          isCreator: true,
+          creatorRoomId: newRoomId,
+        },
       });
     } catch (err) {
       console.error("Unexpected create room error:", err);
@@ -98,6 +107,11 @@ const Home = () => {
         alert("This meeting has ended.");
         return;
       }
+
+      sessionStorage.removeItem("isCreator");
+      sessionStorage.removeItem("creatorRoomId");
+      sessionStorage.setItem("lockedUserName", cleanUserName);
+      localStorage.setItem("userName", cleanUserName);
 
       navigate(`/room/${cleanRoomId}`, {
         replace: true,
