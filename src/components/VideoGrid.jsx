@@ -36,6 +36,7 @@ const VideoGrid = ({
     <div className="video-grid">
       {Object.entries(allStreams).map(([socketId, data]) => {
         const participant = participants.find((p) => p.socketId === socketId);
+
         const realName = data.isLocal
           ? userName
           : participant?.userName || data.userName || "Guest";
@@ -43,10 +44,6 @@ const VideoGrid = ({
         const isParticipantHost = data.isLocal
           ? localIsHost
           : Boolean(participant?.isHost);
-
-        const hasVideoTrack =
-          data.stream?.getVideoTracks?.().some((track) => track.readyState === "live") ||
-          false;
 
         return (
           <VideoTile
@@ -57,7 +54,7 @@ const VideoGrid = ({
             speakingStats={speakingStats?.[socketId] ?? {}}
             raisedHand={Boolean(raisedHands?.[socketId])}
             isRemoteMuted={Boolean(mutedUsers?.[socketId])}
-            isCameraOff={Boolean(cameraOffUsers?.[socketId]) || !hasVideoTrack}
+            isCameraOff={Boolean(cameraOffUsers?.[socketId])}
             isHost={isParticipantHost}
           />
         );

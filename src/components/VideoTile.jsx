@@ -1,8 +1,9 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef } from "react";
 import { MicOff } from "lucide-react";
 
 const getInitials = (name) => {
   if (!name) return "U";
+
   const parts = name.trim().split(" ").filter(Boolean);
 
   if (parts.length >= 2) {
@@ -23,65 +24,37 @@ const VideoTile = ({
   isHost,
 }) => {
   const videoRef = useRef(null);
-  const [hasLiveVideo, setHasLiveVideo] = useState(false);
 
   useEffect(() => {
     const video = videoRef.current;
+
     if (!video || !stream) return;
-
-    const videoTracks = stream.getVideoTracks?.() || [];
-    const hasLiveTrack = videoTracks.some(
-      (track) => track.readyState === "live"
-    );
-
-    setHasLiveVideo(hasLiveTrack);
 
     video.srcObject = stream;
     video.muted = Boolean(isLocal);
     video.playsInline = true;
     video.autoplay = true;
 
-    const tryPlay = async () => {
-      try {
-        await video.play();
-      } catch (err) {
+    const playVideo = () => {
+      video.play().catch((err) => {
         console.warn("Video play retry:", err?.message || err);
+
         setTimeout(() => {
           video.play().catch(() => {});
         }, 500);
-      }
+      });
     };
 
-    tryPlay();
+    playVideo();
 
     const handleLoadedMetadata = () => {
-      video.play().catch(() => {});
-    };
-
-    const handleTrackChange = () => {
-      const live = (stream.getVideoTracks?.() || []).some(
-        (track) => track.readyState === "live"
-      );
-      setHasLiveVideo(live);
-      video.srcObject = stream;
-      video.play().catch(() => {});
+      playVideo();
     };
 
     video.addEventListener("loadedmetadata", handleLoadedMetadata);
 
-    videoTracks.forEach((track) => {
-      track.addEventListener("unmute", handleTrackChange);
-      track.addEventListener("mute", handleTrackChange);
-      track.addEventListener("ended", handleTrackChange);
-    });
-
     return () => {
       video.removeEventListener("loadedmetadata", handleLoadedMetadata);
-      videoTracks.forEach((track) => {
-        track.removeEventListener("unmute", handleTrackChange);
-        track.removeEventListener("mute", handleTrackChange);
-        track.removeEventListener("ended", handleTrackChange);
-      });
 
       if (video.srcObject === stream) {
         video.srcObject = null;
@@ -90,11 +63,26 @@ const VideoTile = ({
   }, [stream, isLocal]);
 
   const isSpeaking = speakingStats?.isSpeaking;
-  const shouldShowPlaceholder = isCameraOff || !hasLiveVideo;
 
   return (
     <div className={`video-tile ${isSpeaking ? "speaking-active" : ""}`}>
-      {shouldShowPlaceholder ? (
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted={Boolean(isLocal)}
+        className="video-element"
+        style={{
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+          background: "#000",
+          transform: isLocal ? "scaleX(-1)" : "none",
+          display: isCameraOff ? "none" : "block",
+        }}
+      />
+
+      {isCameraOff && (
         <div
           className="video-element camera-off-placeholder"
           style={{
@@ -122,28 +110,17 @@ const VideoTile = ({
             {getInitials(userName)}
           </div>
         </div>
-      ) : (
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted={Boolean(isLocal)}
-          className="video-element"
-          style={{
-            width: "100%",
-            height: "100%",
-            objectFit: "cover",
-            background: "#000",
-            transform: isLocal ? "scaleX(-1)" : "none",
-          }}
-        />
       )}
 
       {raisedHand && <div className="raised-hand-badge">✋</div>}
 
       <div
         className="video-overlay"
-        style={{ display: "flex", alignItems: "center", gap: "8px" }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "8px",
+        }}
       >
         <span>{isLocal ? `${userName} (You)` : userName}</span>
 
