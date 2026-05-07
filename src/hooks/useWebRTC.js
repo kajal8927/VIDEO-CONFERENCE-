@@ -1,32 +1,62 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
+const envTurnUrls = import.meta.env.VITE_TURN_URLS;
+const envTurnUsername = import.meta.env.VITE_TURN_USERNAME;
+const envTurnCredential = import.meta.env.VITE_TURN_CREDENTIAL;
+
+const turnUrls = envTurnUrls
+  ? envTurnUrls.split(",").map((url) => url.trim()).filter(Boolean)
+  : [];
+
 const configuration = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
-    {
-      urls: "turn:openrelay.metered.ca:80",
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443",
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
+    ...(turnUrls.length && envTurnUsername && envTurnCredential
+      ? [
+          {
+            urls: turnUrls,
+            username: envTurnUsername,
+            credential: envTurnCredential,
+          },
+        ]
+      : []),
   ],
   iceCandidatePoolSize: 10,
+};
+
+const logTracks = (label, stream) => {
+  if (!stream) {
+    console.warn(`[WebRTC] ${label}: no stream`);
+    return;
+  }
+
+  console.log(
+    `[WebRTC] ${label}:`,
+    stream.getTracks().map((track) => ({
+      kind: track.kind,
+      enabled: track.enabled,
+      readyState: track.readyState,
+      muted: track.muted,
+      id: track.id,
+    }))
+  );
 };
 
 export const useWebRTC = (socket, roomId, localStream) => {
   const [streams, setStreams] = useState({});
   const peersRef = useRef({});
+  const remoteStreamsRef = useRef({});
   const pendingCandidatesRef = useRef({});
   const disconnectTimersRef = useRef({});
   const localStreamRef = useRef(localStream);
 
   useEffect(() => {
     localStreamRef.current = localStream;
+
+    if (localStream) {
+      logTracks("localStream updated", localStream);
+    }
 
     Object.values(peersRef.current).forEach((peer) => {
       if (!localStream) return;
@@ -40,12 +70,14 @@ export const useWebRTC = (socket, roomId, localStream) => {
           sender.replaceTrack(track).catch((err) => {
             console.error("[WebRTC] replaceTrack error:", err);
           });
+        } else {
+          peer.addTrack(track, localStream);
         }
       });
     });
   }, [localStream]);
 
-  const safeClosePeer = useCallback((targetId, shouldStopStream = false) => {
+  const safeClosePeer = useCallback((targetId) => {
     const peer = peersRef.current[targetId];
 
     if (peer) {
@@ -63,14 +95,10 @@ export const useWebRTC = (socket, roomId, localStream) => {
     }
 
     delete pendingCandidatesRef.current[targetId];
+    delete remoteStreamsRef.current[targetId];
 
     setStreams((prev) => {
       const copy = { ...prev };
-
-      if (shouldStopStream && copy[targetId]?.stream) {
-        copy[targetId].stream.getTracks().forEach((track) => track.stop());
-      }
-
       delete copy[targetId];
       return copy;
     });
@@ -90,6 +118,20 @@ export const useWebRTC = (socket, roomId, localStream) => {
     delete pendingCandidatesRef.current[targetId];
   }, []);
 
+  const makeOffer = useCallback(
+    async (peer, targetId, options = {}) => {
+      try {
+        const offer = await peer.createOffer(options);
+        await peer.setLocalDescription(offer);
+        socket.emit("offer", targetId, peer.localDescription);
+        console.log("[WebRTC] offer sent:", targetId);
+      } catch (err) {
+        console.error("[WebRTC] Error creating offer:", err);
+      }
+    },
+    [socket]
+  );
+
   const createPeer = useCallback(
     (targetId, isInitiator) => {
       if (!socket || !targetId || targetId === socket.id) return null;
@@ -105,30 +147,43 @@ export const useWebRTC = (socket, roomId, localStream) => {
       peersRef.current[targetId] = peer;
 
       const stream = localStreamRef.current;
-      if (stream) {
-        stream.getTracks().forEach((track) => {
-          const alreadyAdded = peer
-            .getSenders()
-            .some((sender) => sender.track && sender.track.id === track.id);
 
-          if (!alreadyAdded) {
-            peer.addTrack(track, stream);
-          }
+      if (stream) {
+        logTracks("adding local tracks before offer", stream);
+
+        stream.getTracks().forEach((track) => {
+          peer.addTrack(track, stream);
+          console.log("[WebRTC] added local track:", {
+            targetId,
+            kind: track.kind,
+            enabled: track.enabled,
+            readyState: track.readyState,
+          });
         });
+      } else {
+        console.warn("[WebRTC] No localStream while creating peer:", targetId);
       }
 
       peer.ontrack = (event) => {
-        const [remoteStream] = event.streams;
+        if (!remoteStreamsRef.current[targetId]) {
+          remoteStreamsRef.current[targetId] = new MediaStream();
+        }
 
-        if (!remoteStream) {
-          console.warn("[WebRTC] ontrack fired without remote stream:", targetId);
-          return;
+        const remoteStream = remoteStreamsRef.current[targetId];
+
+        if (!remoteStream.getTracks().some((t) => t.id === event.track.id)) {
+          remoteStream.addTrack(event.track);
         }
 
         console.log("[WebRTC] Remote track received:", {
           targetId,
-          tracks: remoteStream.getTracks().map((t) => `${t.kind}:${t.readyState}`),
+          kind: event.track.kind,
+          enabled: event.track.enabled,
+          readyState: event.track.readyState,
+          muted: event.track.muted,
         });
+
+        logTracks("remote stream tracks", remoteStream);
 
         setStreams((prev) => ({
           ...prev,
@@ -149,7 +204,10 @@ export const useWebRTC = (socket, roomId, localStream) => {
       peer.oniceconnectionstatechange = () => {
         console.log("[WebRTC] ICE state:", targetId, peer.iceConnectionState);
 
-        if (peer.iceConnectionState === "connected" || peer.iceConnectionState === "completed") {
+        if (
+          peer.iceConnectionState === "connected" ||
+          peer.iceConnectionState === "completed"
+        ) {
           if (disconnectTimersRef.current[targetId]) {
             clearTimeout(disconnectTimersRef.current[targetId]);
             delete disconnectTimersRef.current[targetId];
@@ -157,22 +215,15 @@ export const useWebRTC = (socket, roomId, localStream) => {
         }
 
         if (peer.iceConnectionState === "failed") {
-          console.warn("[WebRTC] ICE failed, restarting:", targetId);
-
-          try {
-            peer.restartIce?.();
-          } catch (err) {
-            console.error("[WebRTC] restartIce error:", err);
-          }
+          console.warn("[WebRTC] ICE failed:", targetId);
 
           if (isInitiator) {
-            peer
-              .createOffer({ iceRestart: true })
-              .then((offer) => peer.setLocalDescription(offer))
-              .then(() => {
-                socket.emit("offer", targetId, peer.localDescription);
-              })
-              .catch((err) => console.error("[WebRTC] ICE restart offer error:", err));
+            try {
+              peer.restartIce?.();
+              makeOffer(peer, targetId, { iceRestart: true });
+            } catch (err) {
+              console.error("[WebRTC] ICE restart error:", err);
+            }
           }
         }
 
@@ -188,10 +239,10 @@ export const useWebRTC = (socket, roomId, localStream) => {
                 currentPeer.iceConnectionState === "failed" ||
                 currentPeer.iceConnectionState === "closed")
             ) {
-              console.warn("[WebRTC] Peer stayed disconnected, cleaning:", targetId);
-              safeClosePeer(targetId, false);
+              console.warn("[WebRTC] Peer stayed disconnected:", targetId);
+              safeClosePeer(targetId);
             }
-          }, 10000);
+          }, 30000);
         }
       };
 
@@ -204,25 +255,15 @@ export const useWebRTC = (socket, roomId, localStream) => {
             delete disconnectTimersRef.current[targetId];
           }
         }
-
-        if (peer.connectionState === "failed") {
-          console.warn("[WebRTC] Connection failed:", targetId);
-        }
       };
 
       if (isInitiator) {
-        peer
-          .createOffer()
-          .then((offer) => peer.setLocalDescription(offer))
-          .then(() => {
-            socket.emit("offer", targetId, peer.localDescription);
-          })
-          .catch((err) => console.error("[WebRTC] Error creating offer:", err));
+        makeOffer(peer, targetId);
       }
 
       return peer;
     },
-    [socket, safeClosePeer]
+    [socket, makeOffer, safeClosePeer]
   );
 
   useEffect(() => {
@@ -250,6 +291,7 @@ export const useWebRTC = (socket, roomId, localStream) => {
       console.log("[WebRTC] offer received:", userId);
 
       let peer = peersRef.current[userId];
+
       if (!peer || peer.signalingState === "closed") {
         peer = createPeer(userId, false);
       }
@@ -257,6 +299,15 @@ export const useWebRTC = (socket, roomId, localStream) => {
       if (!peer) return;
 
       try {
+        if (peer.signalingState !== "stable") {
+          console.warn("[WebRTC] Peer not stable before offer, rolling back:", {
+            userId,
+            signalingState: peer.signalingState,
+          });
+
+          await peer.setLocalDescription({ type: "rollback" }).catch(() => {});
+        }
+
         await peer.setRemoteDescription(new RTCSessionDescription(offer));
         await flushPendingCandidates(userId, peer);
 
@@ -264,6 +315,7 @@ export const useWebRTC = (socket, roomId, localStream) => {
         await peer.setLocalDescription(answer);
 
         socket.emit("answer", userId, peer.localDescription);
+        console.log("[WebRTC] answer sent:", userId);
       } catch (err) {
         console.error("[WebRTC] Error handling offer:", err);
       }
@@ -276,9 +328,14 @@ export const useWebRTC = (socket, roomId, localStream) => {
       if (!peer || peer.signalingState === "closed") return;
 
       try {
-        if (peer.signalingState !== "stable") {
+        if (peer.signalingState === "have-local-offer") {
           await peer.setRemoteDescription(new RTCSessionDescription(answer));
           await flushPendingCandidates(userId, peer);
+        } else {
+          console.warn("[WebRTC] Ignoring answer in state:", {
+            userId,
+            signalingState: peer.signalingState,
+          });
         }
       } catch (err) {
         console.error("[WebRTC] Error handling answer:", err);
@@ -288,15 +345,7 @@ export const useWebRTC = (socket, roomId, localStream) => {
     const handleIceCandidate = async (userId, candidate) => {
       const peer = peersRef.current[userId];
 
-      if (!peer || peer.signalingState === "closed") {
-        pendingCandidatesRef.current[userId] = [
-          ...(pendingCandidatesRef.current[userId] || []),
-          candidate,
-        ];
-        return;
-      }
-
-      if (!peer.remoteDescription) {
+      if (!peer || peer.signalingState === "closed" || !peer.remoteDescription) {
         pendingCandidatesRef.current[userId] = [
           ...(pendingCandidatesRef.current[userId] || []),
           candidate,
@@ -313,7 +362,7 @@ export const useWebRTC = (socket, roomId, localStream) => {
 
     const handleUserLeft = (userId) => {
       console.log("[WebRTC] user-left cleanup:", userId);
-      safeClosePeer(userId, true);
+      safeClosePeer(userId);
     };
 
     socket.on("room-users", handleRoomUsers);
@@ -339,6 +388,7 @@ export const useWebRTC = (socket, roomId, localStream) => {
 
       disconnectTimersRef.current = {};
       pendingCandidatesRef.current = {};
+      remoteStreamsRef.current = {};
       peersRef.current = {};
       setStreams({});
     };
@@ -368,6 +418,7 @@ export const useWebRTC = (socket, roomId, localStream) => {
     peersRef.current = {};
     disconnectTimersRef.current = {};
     pendingCandidatesRef.current = {};
+    remoteStreamsRef.current = {};
 
     setStreams({});
   }, []);
